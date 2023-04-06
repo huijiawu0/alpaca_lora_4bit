@@ -21,6 +21,7 @@ import sys
 
 import peft
 import peft.tuners.lora
+
 assert peft.tuners.lora.is_gptq_available()
 
 import torch
@@ -43,9 +44,9 @@ if ft_config.gradient_checkpointing:
 
 # Load Basic Model
 model, tokenizer = load_llama_model_4bit_low_ram(ft_config.llama_q4_config_dir,
-                                                  ft_config.llama_q4_model,
-                                                  device_map=ft_config.device_map,
-                                                  groupsize=ft_config.groupsize)
+                                                 ft_config.llama_q4_model,
+                                                 device_map=ft_config.device_map,
+                                                 groupsize=ft_config.groupsize)
 
 # Config Lora
 lora_config = LoraConfig(
@@ -59,12 +60,9 @@ lora_config = LoraConfig(
 if ft_config.lora_apply_dir is None:
     model = get_peft_model(model, lora_config)
 else:
-    if ft_config.ddp:
-        model = PeftModel.from_pretrained(model, ft_config.lora_apply_dir, device_map="auto", torch_dtype=torch.float32)  # ! Direct copy from inference.py
-    else:
-        model = PeftModel.from_pretrained(model, ft_config.lora_apply_dir, device_map={'': 0}, torch_dtype=torch.float32)
+    model = PeftModel.from_pretrained(model, ft_config.lora_apply_dir, device_map={'': 0},
+                                      torch_dtype=torch.float32)  # ! Direct copy from inference.py
     print(ft_config.lora_apply_dir, 'loaded')
-
 
 # Scales to half
 print('Fitting 4bit scales and zeros to half')
@@ -89,22 +87,25 @@ if not ft_config.skip:
     elif ft_config.ds_type == "gpt4all" and not ft_config.skip:
         #### GPT4All Data
         data = train_data.TrainGPT4All(ft_config.dataset, ft_config.val_set_size, tokenizer, ft_config.cutoff_len)
+    elif ft_config.ds_type == "belle" and not ft_config.skip:
+        data = train_data.TrainBelle(ft_config.dataset, ft_config.val_set_size, tokenizer, ft_config.cutoff_len)
     else:
         raise NotImplementedError("ERROR: Unknown dataset format")
     data.prepare_data(thd=ft_config.txt_row_thd, use_eos_token=ft_config.use_eos_token)
     ####
-
+    
     # Use gradient checkpointing
     if ft_config.gradient_checkpointing:
         print('Applying gradient checkpointing ...')
         from gradient_checkpointing import apply_gradient_checkpointing
+        
         apply_gradient_checkpointing(model, checkpoint_ratio=ft_config.gradient_checkpointing_ratio)
-
+    
     # Disable Trainer's DataParallel for multigpu
     if not ft_config.ddp and torch.cuda.device_count() > 1:
         model.is_parallelizable = True
         model.model_parallel = True
-
+    
     training_arguments = transformers.TrainingArguments(
         per_device_train_batch_size=ft_config.mbatch_size,
         gradient_accumulation_steps=ft_config.gradient_accumulation_steps,
@@ -122,7 +123,7 @@ if not ft_config.skip:
         load_best_model_at_end=False,
         ddp_find_unused_parameters=False if ft_config.ddp else None,
     )
-
+    
     trainer = transformers.Trainer(
         model=model,
         train_dataset=data.train_data,
@@ -131,24 +132,24 @@ if not ft_config.skip:
         data_collator=transformers.DataCollatorForLanguageModeling(tokenizer, mlm=False),
     )
     model.config.use_cache = False
-
+    
     # Set Model dict
     old_state_dict = model.state_dict
     model.state_dict = (
         lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
     ).__get__(model, type(model))
-
+    
     # Set Verbose
     if ft_config.verbose:
         transformers.logging.set_verbosity_info()
-
+    
     # Run Trainer
     if ft_config.resume_checkpoint:
         print('Resuming from {} ...'.format(ft_config.resume_checkpoint))
         trainer.train(ft_config.resume_checkpoint)
     else:
         trainer.train()
-
+    
     print('Train completed.')
 
 # Save Model

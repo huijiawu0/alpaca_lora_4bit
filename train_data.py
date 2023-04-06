@@ -189,6 +189,64 @@ class TrainSAD(ATrainData):
         prompt = self.generate_prompt(data_point, **kwargs)
         return self.tokenize(prompt, **kwargs)
 
+
+class TrainBelle(ATrainData):
+    def __init__(self, dataset: str, val_set_size: int, tokenizer, cutoff_len) -> None:
+        super().__init__(dataset, val_set_size, tokenizer, cutoff_len)
+
+    def tokenize(self, prompt: str, use_eos_token=True, **kwargs) -> Dict[str, Any]:
+        # there's probably a way to do this with the tokenizer settings
+        # but again, gotta move fast
+        if use_eos_token:
+            result = self.tokenizer(
+                prompt + self.tokenizer.eos_token,
+                truncation=True,
+                max_length=self.cutoff_len,
+                padding=False,
+            )
+            if (
+                result["input_ids"][-1] != self.tokenizer.eos_token_id
+                and len(result["input_ids"]) < self.cutoff_len
+            ):
+                result["input_ids"].append(self.tokenizer.eos_token_id)
+                result["attention_mask"].append(1)
+            return result
+        else:
+            result = self.tokenizer(
+                prompt,
+                truncation=True,
+                max_length=self.cutoff_len + 1,
+                padding="max_length",
+            )
+            return {
+                "input_ids": result["input_ids"][:-1],
+                "attention_mask": result["attention_mask"][:-1],
+            }
+
+    def prepare_data(self, use_eos_token=True, **kwargs) -> None:
+        data = load_dataset("json", data_files=self.dataset)
+
+        if self.val_set_size > 0:
+            train_val = data["train"].train_test_split(
+                test_size=self.val_set_size, shuffle=True, seed=42  # ! Seed = 42 (?)
+            )
+            self.train_data = train_val["train"].shuffle().map(lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+            self.val_data = train_val["test"].shuffle().map(lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+        else:
+            self.train_data = data["train"].shuffle().map(lambda x: self.generate_and_tokenize_prompt(x, use_eos_token=use_eos_token))
+            self.val_data = None
+
+    def generate_and_tokenize_prompt(self, data_point):
+        instruction = data_point['instruction']
+        input_text = data_point["input"]
+        input_text = "Human: " + instruction + input_text + "\n\nAssistant: "
+        input_text = self.tokenizer.bos_token + input_text if self.tokenizer.bos_token!=None else input_text
+        target_text = data_point["output"] + self.tokenizer.eos_token
+        full_prompt = input_text+target_text
+        tokenized_full_prompt = self.tokenize(full_prompt)
+        return tokenized_full_prompt
+
+
 # GPT4All-like Data
 class TrainGPT4All(ATrainData):
     def __init__(self, dataset: str, val_set_size: int, tokenizer, cutoff_len) -> None:
